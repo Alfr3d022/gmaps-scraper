@@ -1,0 +1,15 @@
+services:
+  gmaps-scraper:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - HEADLESS=true
+      - DELAY_MIN_MS=2500
+      - DELAY_MAX_MS=6000
+      - MAX_RESULTS_PER_QUERY=120
+      - ENRICH_EMAIL=true
+      - API_KEY=${API_KEY:-}
+      - PROXY_URL=${PROXY_URL:-}
+    restart: unless-stopped
