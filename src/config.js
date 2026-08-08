@@ -15,6 +15,9 @@ export const config = {
   // Limite de resultados por busca antes do Maps parar de carregar mais no scroll
   maxResultsPerQuery: parseInt(process.env.MAX_RESULTS_PER_QUERY || '120', 10),
 
+  // Abas simultâneas ao visitar páginas individuais de cada lugar
+  placeConcurrency: Math.min(5, Math.max(1, parseInt(process.env.PLACE_CONCURRENCY || '3', 10))),
+
   // Timeout de navegação, em ms
   navigationTimeoutMs: parseInt(process.env.NAVIGATION_TIMEOUT_MS || '30000', 10),
 

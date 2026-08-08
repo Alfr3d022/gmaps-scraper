@@ -1,7 +1,7 @@
 import express from 'express';
 import { config } from './config.js';
 import { logger } from './utils/logger.js';
-import { scrapeGoogleMaps } from './scraper/mapsScraper.js';
+import { scrapeGoogleMapsBatch } from './scraper/mapsScraper.js';
 
 const app = express();
 app.use(express.json());
@@ -49,8 +49,10 @@ app.post('/scrape', checkApiKey, async (req, res) => {
   logger.info({ queries, location, maxResults }, 'Iniciando scraping');
 
   try {
+    const batches = await scrapeGoogleMapsBatch({ queries, location, maxResults });
+
     if (queries.length === 1) {
-      const results = await scrapeGoogleMaps({ query: queries[0], location, maxResults });
+      const results = batches[0].results;
       return res.json({
         query: queries[0],
         location: location || null,
@@ -59,19 +61,14 @@ app.post('/scrape', checkApiKey, async (req, res) => {
       });
     }
 
-    const batches = [];
-    let totalCount = 0;
-
-    for (const term of queries) {
-      const results = await scrapeGoogleMaps({ query: term, location, maxResults });
-      batches.push({ query: term, count: results.length, results });
-      totalCount += results.length;
-    }
-
     res.json({
       location: location || null,
-      count: totalCount,
-      queries: batches,
+      count: batches.reduce((sum, batch) => sum + batch.results.length, 0),
+      queries: batches.map(({ query: term, results }) => ({
+        query: term,
+        count: results.length,
+        results,
+      })),
     });
   } catch (err) {
     logger.error({ err: err.message }, 'Erro no scraping');

@@ -3,7 +3,6 @@ import { logger } from '../utils/logger.js';
 
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 
-// Domínios/padrões que geram falsos positivos comuns (imagens, exemplos, tracking pixels)
 const IGNORE_PATTERNS = [
   /\.(png|jpg|jpeg|gif|svg|webp)$/i,
   /^example@/i,
@@ -15,7 +14,7 @@ function isLikelyValidEmail(email) {
   return !IGNORE_PATTERNS.some((pattern) => pattern.test(email));
 }
 
-async function fetchHtml(url, timeoutMs = 10000) {
+async function fetchHtml(url, timeoutMs = 8000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -33,12 +32,11 @@ async function fetchHtml(url, timeoutMs = 10000) {
 }
 
 function extractEmailsFromHtml(html) {
-  if (!html) return [];
+  if (!html) {
+    return { best: null, source: null, all: [] };
+  }
 
-  // mailto: é o sinal mais confiável — quem coloca isso quer receber email ali
   const mailtoMatches = [...html.matchAll(/href=["']mailto:([^"'?]+)/gi)].map((m) => m[1]);
-
-  // regex solto no texto é fallback, mais sujeito a falso positivo
   const textMatches = html.match(EMAIL_REGEX) || [];
 
   const all = [...mailtoMatches, ...textMatches]
@@ -52,25 +50,30 @@ function extractEmailsFromHtml(html) {
   };
 }
 
-/** Visita a home do site e, se não achar nada, tenta páginas de contato comuns. */
+function pickBestEmailResult(homeResult, fallbackResults) {
+  if (homeResult.best) return homeResult;
+
+  for (const found of fallbackResults) {
+    if (found.best) return found;
+  }
+
+  return homeResult;
+}
+
+/** Visita a home e páginas de contato comuns em paralelo. */
 export async function extractEmailFromWebsite(websiteUrl) {
   try {
     const url = websiteUrl.startsWith('http') ? websiteUrl : `https://${websiteUrl}`;
-    const homeHtml = await fetchHtml(url);
-    let result = extractEmailsFromHtml(homeHtml);
+    const base = new URL(url);
 
-    if (!result.best) {
-      const base = new URL(url);
-      for (const path of config.emailFallbackPaths) {
-        const candidateUrl = `${base.origin}${path}`;
-        const html = await fetchHtml(candidateUrl, 6000);
-        const found = extractEmailsFromHtml(html);
-        if (found.best) {
-          result = found;
-          break;
-        }
-      }
-    }
+    const [homeHtml, ...fallbackHtmls] = await Promise.all([
+      fetchHtml(url),
+      ...config.emailFallbackPaths.map((path) => fetchHtml(`${base.origin}${path}`, 5000)),
+    ]);
+
+    const homeResult = extractEmailsFromHtml(homeHtml);
+    const fallbackResults = fallbackHtmls.map(extractEmailsFromHtml);
+    const result = pickBestEmailResult(homeResult, fallbackResults);
 
     return result.best ? { email: result.best, source: result.source, allFound: result.all } : null;
   } catch (err) {

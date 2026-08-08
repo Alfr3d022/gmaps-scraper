@@ -1,6 +1,6 @@
 # Imagem oficial do Playwright já vem com Chromium, dependências do sistema
 # e fontes corretas — evita o inferno de libs faltando em imagens genéricas do Node.
-FROM mcr.microsoft.com/playwright:v1.47.0-jammy
+FROM mcr.microsoft.com/playwright:v1.62.1-jammy
 
 WORKDIR /app
 

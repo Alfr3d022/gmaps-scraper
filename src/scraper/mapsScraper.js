@@ -51,13 +51,24 @@ async function newStealthContext(browser) {
     timezoneId: 'America/Sao_Paulo',
   });
 
-  // Remove o sinal mais óbvio de automação (navigator.webdriver)
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
 
   context.setDefaultTimeout(config.navigationTimeoutMs);
   return context;
+}
+
+async function runInParallelBatches(items, concurrency, worker) {
+  const results = [];
+  for (let i = 0; i < items.length; i += concurrency) {
+    const batch = items.slice(i, i + concurrency);
+    results.push(...await Promise.all(batch.map(worker)));
+    if (i + concurrency < items.length) {
+      await microDelay();
+    }
+  }
+  return results;
 }
 
 /** Rola o painel de resultados até coletar `maxResults` cards ou o Maps parar de carregar mais. */
@@ -92,11 +103,34 @@ async function collectResultLinks(page, maxResults) {
   return Array.from(links).slice(0, maxResults);
 }
 
+async function runMapsSearch(page, { query, location, maxResults, isFirstSearch }) {
+  const searchTerm = location ? `${query} ${location}` : query;
+
+  if (isFirstSearch) {
+    await page.goto('https://www.google.com/maps', { waitUntil: 'domcontentloaded' });
+    await randomDelay();
+  } else {
+    await microDelay();
+  }
+
+  const searchBox = await findSearchBox(page);
+  if (!searchBox) throw new Error('Caixa de busca do Maps não encontrada — possível bloqueio ou mudança de layout.');
+
+  await searchBox.click({ clickCount: 3 });
+  await searchBox.fill(searchTerm);
+  await page.keyboard.press('Enter');
+  await randomDelay(1500, 3000);
+
+  const links = await collectResultLinks(page, maxResults);
+  logger.info({ count: links.length, searchTerm, concurrency: config.placeConcurrency }, 'Links coletados');
+  return links;
+}
+
 async function scrapePlacePage(context, url) {
   const page = await context.newPage();
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded' });
-    await randomDelay(1200, 2500);
+    await microDelay();
 
     const name = await findPlaceName(page);
     const address = await findAddress(page);
@@ -119,12 +153,7 @@ async function scrapePlacePage(context, url) {
 
     const phone = phoneRaw ? normalizeBrazilianPhone(phoneRaw) : null;
 
-    let email = null;
-    if (website && config.enrichEmail) {
-      email = await extractEmailFromWebsite(website);
-    }
-
-    return { name, address, phone, website, email, mapsUrl: url };
+    return { name, address, phone, website, email: null, mapsUrl: url };
   } catch (err) {
     logger.warn({ err: err.message, url }, 'Falha ao processar página do lugar');
     return { name: null, address: null, phone: null, website: null, email: null, mapsUrl: url, error: err.message };
@@ -133,43 +162,88 @@ async function scrapePlacePage(context, url) {
   }
 }
 
+async function scrapePlacesInParallel(context, links) {
+  const absoluteUrls = links.map((link) => (
+    link.startsWith('http') ? link : `https://www.google.com${link}`
+  ));
+
+  return runInParallelBatches(
+    absoluteUrls,
+    config.placeConcurrency,
+    (url) => scrapePlacePage(context, url),
+  );
+}
+
+async function enrichResultsWithEmail(results) {
+  if (!config.enrichEmail) return results;
+
+  return runInParallelBatches(
+    results,
+    config.placeConcurrency,
+    async (result) => {
+      if (!result.website) return result;
+      const email = await extractEmailFromWebsite(result.website);
+      return { ...result, email };
+    },
+  );
+}
+
+async function scrapeQueryInSession(context, searchPage, { query, location, maxResults, isFirstSearch }) {
+  const links = await runMapsSearch(searchPage, { query, location, maxResults, isFirstSearch });
+  const results = await scrapePlacesInParallel(context, links);
+  return enrichResultsWithEmail(results);
+}
+
 /**
  * Busca lugares no Google Maps por termo + localização e retorna nome, endereço,
  * telefone normalizado, site e email (quando o site tiver).
  */
-export async function scrapeGoogleMaps({ query, location, maxResults = config.maxResultsPerQuery }) {
+export async function scrapeGoogleMaps({
+  query,
+  location,
+  maxResults = config.maxResultsPerQuery,
+}) {
   const browser = await launchBrowser();
   const context = await newStealthContext(browser);
-  const results = [];
+  const searchPage = await context.newPage();
 
   try {
-    const page = await context.newPage();
-    const searchTerm = location ? `${query} ${location}` : query;
+    return await scrapeQueryInSession(context, searchPage, {
+      query,
+      location,
+      maxResults,
+      isFirstSearch: true,
+    });
+  } finally {
+    await searchPage.close();
+    await context.close();
+    await browser.close();
+  }
+}
 
-    await page.goto('https://www.google.com/maps', { waitUntil: 'domcontentloaded' });
-    await randomDelay();
+/** Executa várias buscas reutilizando um único browser/context e a mesma aba de busca. */
+export async function scrapeGoogleMapsBatch({ queries, location, maxResults = config.maxResultsPerQuery }) {
+  const browser = await launchBrowser();
+  const context = await newStealthContext(browser);
+  const searchPage = await context.newPage();
 
-    const searchBox = await findSearchBox(page);
-    if (!searchBox) throw new Error('Caixa de busca do Maps não encontrada — possível bloqueio ou mudança de layout.');
+  try {
+    const batches = [];
 
-    await searchBox.click();
-    await searchBox.type(searchTerm, { delay: 60 + Math.random() * 80 });
-    await page.keyboard.press('Enter');
-    await randomDelay(2000, 4000);
-
-    const links = await collectResultLinks(page, maxResults);
-    logger.info({ count: links.length, searchTerm }, 'Links coletados');
-    await page.close();
-
-    for (const link of links) {
-      const absoluteUrl = link.startsWith('http') ? link : `https://www.google.com${link}`;
-      const result = await scrapePlacePage(context, absoluteUrl);
-      results.push(result);
-      await randomDelay();
+    for (let i = 0; i < queries.length; i += 1) {
+      const query = queries[i];
+      const results = await scrapeQueryInSession(context, searchPage, {
+        query,
+        location,
+        maxResults,
+        isFirstSearch: i === 0,
+      });
+      batches.push({ query, results });
     }
 
-    return results;
+    return batches;
   } finally {
+    await searchPage.close();
     await context.close();
     await browser.close();
   }
