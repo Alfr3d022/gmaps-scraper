@@ -103,11 +103,25 @@ async function collectResultLinks(page, maxResults) {
   return Array.from(links).slice(0, maxResults);
 }
 
+async function handleGoogleConsent(page) {
+  if (!page.url().includes('consent.google.')) return;
+
+  const button = page.getByRole('button', {
+    name: /rejeitar tudo|reject all|recusar tudo|tout refuser|alles ablehnen/i,
+  }).first();
+
+  if (await button.isVisible().catch(() => false)) {
+    await button.click();
+    await page.waitForLoadState('domcontentloaded');
+  }
+}
+
 async function runMapsSearch(page, { query, location, maxResults, isFirstSearch }) {
   const searchTerm = location ? `${query} ${location}` : query;
 
   if (isFirstSearch) {
-    await page.goto('https://www.google.com/maps', { waitUntil: 'domcontentloaded' });
+    await page.goto('https://www.google.com/maps?hl=pt-BR&gl=br', { waitUntil: 'domcontentloaded' });
+    await handleGoogleConsent(page);
     await randomDelay();
   } else {
     await microDelay();
