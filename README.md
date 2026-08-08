@@ -97,6 +97,7 @@ Resposta (uma busca):
         "formatted": "(17) 99999-8888",
         "blocked": false
       },
+      "whatsappUrl": "https://wa.me/5517999998888",
       "website": "https://sushidaesquina.com.br",
       "email": {
         "email": "contato@sushidaesquina.com.br",

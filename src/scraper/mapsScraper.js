@@ -2,7 +2,7 @@ import { chromium } from 'playwright';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { randomDelay, microDelay } from '../utils/delay.js';
-import { normalizeBrazilianPhone } from '../utils/phoneNormalizer.js';
+import { buildWhatsAppUrl, normalizeBrazilianPhone } from '../utils/phoneNormalizer.js';
 import {
   findSearchBox,
   findResultsFeed,
@@ -166,11 +166,21 @@ async function scrapePlacePage(context, url) {
     }
 
     const phone = phoneRaw ? normalizeBrazilianPhone(phoneRaw) : null;
+    const whatsappUrl = buildWhatsAppUrl(phone);
 
-    return { name, address, phone, website, email: null, mapsUrl: url };
+    return { name, address, phone, whatsappUrl, website, email: null, mapsUrl: url };
   } catch (err) {
     logger.warn({ err: err.message, url }, 'Falha ao processar página do lugar');
-    return { name: null, address: null, phone: null, website: null, email: null, mapsUrl: url, error: err.message };
+    return {
+      name: null,
+      address: null,
+      phone: null,
+      whatsappUrl: null,
+      website: null,
+      email: null,
+      mapsUrl: url,
+      error: err.message,
+    };
   } finally {
     await page.close();
   }

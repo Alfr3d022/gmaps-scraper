@@ -39,3 +39,12 @@ export function normalizeBrazilianPhone(raw) {
 
   return { raw, digitsOnly: withoutCountryCode, ddd, type, formatted, blocked: false };
 }
+
+/** Retorna o link direto do WhatsApp para um telefone brasileiro válido. */
+export function buildWhatsAppUrl(phone) {
+  if (!phone || phone.blocked || phone.type === 'invalido' || !phone.digitsOnly) {
+    return null;
+  }
+
+  return `https://wa.me/55${phone.digitsOnly}`;
+}
