@@ -31,14 +31,22 @@ function normalizeQueries(query) {
   return [];
 }
 
+function normalizeBlacklist(blacklist) {
+  if (blacklist === undefined) return [];
+  if (!Array.isArray(blacklist) || blacklist.some((item) => typeof item !== 'string')) return null;
+
+  return [...new Set(blacklist.map((item) => item.trim()).filter(Boolean))];
+}
+
 /**
  * POST /scrape
- * Body: { "query": "restaurante japonês", "location": "Barretos, SP", "maxResults": 40 }
+ * Body: { "query": "restaurante japonês", "location": "Barretos, SP", "maxResults": 40, "blacklist": ["Nome ignorado"] }
  * Body (várias buscas): { "query": ["pizzaria", "farmacia"], "location": "Barretos, SP", "maxResults": 10 }
  */
 app.post('/scrape', checkApiKey, async (req, res) => {
-  const { query, location, maxResults } = req.body || {};
+  const { query, location, maxResults, blacklist: blacklistInput } = req.body || {};
   const queries = normalizeQueries(query);
+  const blacklist = normalizeBlacklist(blacklistInput);
 
   if (queries.length === 0) {
     return res.status(400).json({
@@ -46,10 +54,16 @@ app.post('/scrape', checkApiKey, async (req, res) => {
     });
   }
 
-  logger.info({ queries, location, maxResults }, 'Iniciando scraping');
+  if (blacklist === null) {
+    return res.status(400).json({
+      error: 'Campo "blacklist" deve ser um array de nomes (ex: ["Empresa A", "Empresa B"])',
+    });
+  }
+
+  logger.info({ queries, location, maxResults, blacklistCount: blacklist.length }, 'Iniciando scraping');
 
   try {
-    const batches = await scrapeGoogleMapsBatch({ queries, location, maxResults });
+    const batches = await scrapeGoogleMapsBatch({ queries, location, maxResults, blacklist });
 
     if (queries.length === 1) {
       const results = batches[0].results;

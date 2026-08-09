@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { randomDelay, microDelay } from '../utils/delay.js';
 import { buildWhatsAppUrl, normalizeBrazilianPhone } from '../utils/phoneNormalizer.js';
+import { createNameBlacklist, isNameBlacklisted } from '../utils/nameBlacklist.js';
 import {
   findSearchBox,
   findResultsFeed,
@@ -71,38 +72,6 @@ async function runInParallelBatches(items, concurrency, worker) {
   return results;
 }
 
-/** Rola o painel de resultados até coletar `maxResults` cards ou o Maps parar de carregar mais. */
-async function collectResultLinks(page, maxResults) {
-  const feed = await findResultsFeed(page);
-  if (!feed) throw new Error('Painel de resultados não encontrado — o Maps pode ter mudado o layout ou bloqueou a sessão.');
-
-  const links = new Set();
-  let lastCount = 0;
-  let stagnantRounds = 0;
-
-  while (links.size < maxResults && stagnantRounds < 4) {
-    for (const sel of resultCardSelectors()) {
-      const hrefs = await page.locator(sel).evaluateAll(
-        (els) => els.map((el) => el.getAttribute('href')).filter(Boolean),
-      );
-      hrefs.forEach((h) => links.add(h));
-      if (links.size >= maxResults) break;
-    }
-
-    await feed.evaluate((el) => el.scrollBy(0, el.scrollHeight));
-    await microDelay();
-
-    if (links.size === lastCount) {
-      stagnantRounds += 1;
-    } else {
-      stagnantRounds = 0;
-    }
-    lastCount = links.size;
-  }
-
-  return Array.from(links).slice(0, maxResults);
-}
-
 async function handleGoogleConsent(page) {
   if (!page.url().includes('consent.google.')) return;
 
@@ -135,9 +104,7 @@ async function runMapsSearch(page, { query, location, maxResults, isFirstSearch 
   await page.keyboard.press('Enter');
   await randomDelay(1500, 3000);
 
-  const links = await collectResultLinks(page, maxResults);
-  logger.info({ count: links.length, searchTerm, concurrency: config.placeConcurrency }, 'Links coletados');
-  return links;
+  return searchTerm;
 }
 
 async function scrapePlacePage(context, url) {
@@ -186,16 +153,72 @@ async function scrapePlacePage(context, url) {
   }
 }
 
-async function scrapePlacesInParallel(context, links) {
-  const absoluteUrls = links.map((link) => (
-    link.startsWith('http') ? link : `https://www.google.com${link}`
-  ));
+async function collectAllowedPlaces(context, searchPage, maxResults, blacklistNames) {
+  const feed = await findResultsFeed(searchPage);
+  if (!feed) throw new Error('Painel de resultados não encontrado — o Maps pode ter mudado o layout ou bloqueou a sessão.');
 
-  return runInParallelBatches(
-    absoluteUrls,
-    config.placeConcurrency,
-    (url) => scrapePlacePage(context, url),
-  );
+  const blacklist = createNameBlacklist(blacklistNames);
+  const discoveredLinks = new Set();
+  const processedLinks = new Set();
+  const results = [];
+  let excludedCount = 0;
+  let lastDiscoveredCount = 0;
+  let stagnantRounds = 0;
+
+  while (results.length < maxResults && stagnantRounds < 4) {
+    for (const selector of resultCardSelectors()) {
+      const hrefs = await searchPage.locator(selector).evaluateAll(
+        (elements) => elements.map((element) => element.getAttribute('href')).filter(Boolean),
+      );
+      hrefs.forEach((href) => discoveredLinks.add(href));
+    }
+
+    const pendingLinks = Array.from(discoveredLinks)
+      .filter((link) => !processedLinks.has(link));
+
+    for (let i = 0; i < pendingLinks.length && results.length < maxResults; i += config.placeConcurrency) {
+      const links = pendingLinks.slice(i, i + config.placeConcurrency);
+      links.forEach((link) => processedLinks.add(link));
+
+      const batch = await Promise.all(links.map((link) => {
+        const url = link.startsWith('http') ? link : `https://www.google.com${link}`;
+        return scrapePlacePage(context, url);
+      }));
+
+      for (const result of batch) {
+        if (isNameBlacklisted(result.name, blacklist)) {
+          excludedCount += 1;
+        } else if (results.length < maxResults) {
+          results.push(result);
+        }
+      }
+
+      if (i + config.placeConcurrency < pendingLinks.length && results.length < maxResults) {
+        await microDelay();
+      }
+    }
+
+    if (results.length >= maxResults) break;
+
+    await feed.evaluate((element) => element.scrollBy(0, element.scrollHeight));
+    await microDelay();
+
+    if (discoveredLinks.size === lastDiscoveredCount) {
+      stagnantRounds += 1;
+    } else {
+      stagnantRounds = 0;
+    }
+    lastDiscoveredCount = discoveredLinks.size;
+  }
+
+  logger.info({
+    candidates: processedLinks.size,
+    count: results.length,
+    excludedByBlacklist: excludedCount,
+    concurrency: config.placeConcurrency,
+  }, 'Resultados coletados');
+
+  return results;
 }
 
 async function enrichResultsWithEmail(results) {
@@ -212,9 +235,16 @@ async function enrichResultsWithEmail(results) {
   );
 }
 
-async function scrapeQueryInSession(context, searchPage, { query, location, maxResults, isFirstSearch }) {
-  const links = await runMapsSearch(searchPage, { query, location, maxResults, isFirstSearch });
-  const results = await scrapePlacesInParallel(context, links);
+async function scrapeQueryInSession(context, searchPage, {
+  query,
+  location,
+  maxResults,
+  blacklist,
+  isFirstSearch,
+}) {
+  const searchTerm = await runMapsSearch(searchPage, { query, location, maxResults, isFirstSearch });
+  const results = await collectAllowedPlaces(context, searchPage, maxResults, blacklist);
+  logger.info({ count: results.length, searchTerm }, 'Busca concluída');
   return enrichResultsWithEmail(results);
 }
 
@@ -226,6 +256,7 @@ export async function scrapeGoogleMaps({
   query,
   location,
   maxResults = config.maxResultsPerQuery,
+  blacklist = [],
 }) {
   const browser = await launchBrowser();
   const context = await newStealthContext(browser);
@@ -236,6 +267,7 @@ export async function scrapeGoogleMaps({
       query,
       location,
       maxResults,
+      blacklist,
       isFirstSearch: true,
     });
   } finally {
@@ -246,7 +278,12 @@ export async function scrapeGoogleMaps({
 }
 
 /** Executa várias buscas reutilizando um único browser/context e a mesma aba de busca. */
-export async function scrapeGoogleMapsBatch({ queries, location, maxResults = config.maxResultsPerQuery }) {
+export async function scrapeGoogleMapsBatch({
+  queries,
+  location,
+  maxResults = config.maxResultsPerQuery,
+  blacklist = [],
+}) {
   const browser = await launchBrowser();
   const context = await newStealthContext(browser);
   const searchPage = await context.newPage();
@@ -260,6 +297,7 @@ export async function scrapeGoogleMapsBatch({ queries, location, maxResults = co
         query,
         location,
         maxResults,
+        blacklist,
         isFirstSearch: i === 0,
       });
       batches.push({ query, results });

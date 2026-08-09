@@ -66,16 +66,22 @@ Body (uma busca):
 {
   "query": "restaurante japonês",
   "location": "Barretos, SP",
-  "maxResults": 40
+  "maxResults": 40,
+  "blacklist": ["Restaurante já cadastrado", "Empresa ignorada"]
 }
 ```
+
+`blacklist` é opcional. Os nomes são comparados sem diferenciar maiúsculas, minúsculas,
+acentos ou espaços repetidos. Quando um resultado está na lista, ele é descartado e o
+scraper continua buscando até completar `maxResults`, se houver mais resultados no Maps.
 
 Body (várias buscas — `maxResults` vale por termo):
 ```json
 {
   "query": ["pizzaria", "farmacia", "mercado", "loja"],
   "location": "Barretos, SP",
-  "maxResults": 10
+  "maxResults": 10,
+  "blacklist": ["Empresa A", "Empresa B"]
 }
 ```
 
@@ -136,7 +142,7 @@ Node **HTTP Request**:
 - Method: `POST`
 - URL: `http://<host-do-servico>:3000/scrape`
 - Headers: `x-api-key: <sua chave>`
-- Body (JSON): `{{ { query: $json.termo, location: $json.regiao, maxResults: 40 } }}`
+- Body (JSON): `{{ { query: $json.termo, location: $json.regiao, maxResults: 40, blacklist: $json.blacklist || [] } }}`
 
 O resultado já vem em JSON estruturado, pronto pra alimentar seu node de deduplicação
 e salvar no Google Sheets, no mesmo formato que você já usa.
